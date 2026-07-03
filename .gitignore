@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# 用户数据永远不进 git
+profile.json
