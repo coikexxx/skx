@@ -30,12 +30,18 @@ Orphan skills in shared source (4)
 Issues: 1 error / 0 warnings
   ✗ [claude] broken link: broken-test -> /nonexistent/path
 
-Total context tax (est.): ~4639 tokens/session
+Instruction files (loaded in full every session)
+  claude: ≈ 441 tokens
+    - ~/.claude/CLAUDE.md  ~202
+    - └@ ~/.claude/RTK.md  ~239
+
+Total context tax (est.): ~5408 tokens/session  = skill descriptions ~4639 + instruction files ~769
 ```
 
 ## What it checks
 
 - **Context tax** — every skill description enters every session's context. skx estimates the total per host and names the 5 heaviest offenders
+- **Instruction files** — `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `.cursorrules` / `copilot-instructions.md` are loaded **in full** every session. skx estimates each, follows `@import` chains, and flags broken imports and oversized files
 - **Broken links / missing SKILL.md / empty descriptions** — installed but useless
 - **Name conflicts** — frontmatter `name` vs directory name mismatches make triggering unpredictable
 - **Bin shadowing** — npm global packages that register bins colliding with system commands (real case: a package registering `make`)

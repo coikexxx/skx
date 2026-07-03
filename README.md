@@ -30,12 +30,18 @@ codex: 21 个技能，description 合计 ≈ 2639 tokens/会话
 问题: 1 个错误 / 0 个提醒
   ✗ [claude] 坏链: broken-test -> /nonexistent/path
 
-合计 context 税(估算): ~4639 tokens/会话
+指令文件(每次会话全文加载)
+  claude: ≈ 441 tokens
+    - ~/.claude/CLAUDE.md  ~202
+    - └@ ~/.claude/RTK.md  ~239
+
+合计 context 税(估算): ~5408 tokens/会话  = skill 描述 ~4639 + 指令文件 ~769
 ```
 
 ## 它检查什么
 
 - **context 税**：每个 skill 的 description 每次会话都会进上下文。skx 估算每个宿主的总开销，列出最重的 5 个
+- **指令文件**：`CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `.cursorrules` / `copilot-instructions.md` 这些文件每次会话**全文**加载。skx 逐个估算 token，自动跟随 `@import` 链，抓出断掉的 import 和过重的文件
 - **坏链 / 无 SKILL.md / 空 description**：装了等于没装，还占地方
 - **同名冲突 / 名称不一致**：frontmatter `name` 和目录名对不上时，触发行为不可预期
 - **bin 遮蔽**：npm 全局包的 bin 撞掉系统命令（真实案例：某包注册了 `make`）

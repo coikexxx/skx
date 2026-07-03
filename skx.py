@@ -22,7 +22,7 @@ import sys
 import unicodedata
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 HOME = Path.home()
 # 单一真源目录与 profile 位置均可用环境变量覆盖
@@ -39,6 +39,21 @@ HOST_CANDIDATES = {
     "trae": HOME / ".trae" / "skills",
     "opencode": HOME / ".opencode" / "skills",
 }
+
+# 全局指令文件：宿主每次会话都会全文加载
+INSTRUCTION_GLOBALS = {
+    "claude": HOME / ".claude" / "CLAUDE.md",
+    "codex": HOME / ".codex" / "AGENTS.md",
+    "gemini": HOME / ".gemini" / "GEMINI.md",
+}
+# 项目级指令文件（相对当前目录）
+PROJECT_INSTRUCTION_FILES = [
+    "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md",
+    ".cursorrules", ".windsurfrules",
+    ".github/copilot-instructions.md",
+]
+# Claude 的 @import 语法：独占一行的 @path
+IMPORT_RE = re.compile(r"^\s*@(\S+)\s*$", re.M)
 
 SYSTEM_BIN_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 USER_BIN_DIRS = [HOME / ".local" / "bin"]
@@ -160,6 +175,51 @@ def detect_hosts():
     return {n: d for n, d in HOST_CANDIDATES.items() if d.is_dir()}
 
 
+def collect_instruction_chain(path, seen=None, depth=0):
+    """跟随 @import 链读取指令文件。返回 [(路径, tokens, 是否缺失)]。"""
+    if seen is None:
+        seen = set()
+    real = os.path.realpath(str(path))
+    if real in seen:
+        return []
+    seen.add(real)
+    p = Path(path)
+    if not p.is_file():
+        return [(str(p), 0, True)]
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [(str(p), 0, True)]
+    chain = [(str(p), est_tokens(text), False)]
+    if depth >= 3:
+        return chain
+    for m in IMPORT_RE.finditer(text):
+        ref = os.path.expanduser(m.group(1))
+        rp = Path(ref)
+        if not rp.is_absolute():
+            rp = p.parent / rp
+        chain += collect_instruction_chain(rp, seen, depth + 1)
+    return chain
+
+
+def scan_instructions():
+    """全局 + 当前项目的指令文件（每次会话全文加载的固定成本）。"""
+    out = {"global": {}, "project": []}
+    for host, f in INSTRUCTION_GLOBALS.items():
+        if f.is_file():
+            out["global"][host] = collect_instruction_chain(f)
+    cwd = Path.cwd()
+    for rel in PROJECT_INSTRUCTION_FILES:
+        f = cwd / rel
+        if f.is_file():
+            out["project"] += collect_instruction_chain(f)
+    rules_dir = cwd / ".cursor" / "rules"
+    if rules_dir.is_dir():
+        for f in sorted(rules_dir.glob("*.mdc")):
+            out["project"] += collect_instruction_chain(f)
+    return out
+
+
 def bin_shadow_check():
     """用户 bin 目录里是否有文件遮蔽系统命令（make 事件防复发）。"""
     system_names = set()
@@ -242,6 +302,22 @@ def build_report():
                 {"level": "warn", "host": "sources",
                  "msg": f"真源重名: {name} 同时在 {s['path']} 与 {s['dup_with']}"})
 
+    # 指令文件（CLAUDE.md / AGENTS.md / .cursorrules 及 @import 链）
+    instr = scan_instructions()
+    report["instructions"] = instr
+    all_chains = list(instr["global"].items()) + (
+        [("project", instr["project"])] if instr["project"] else [])
+    for scope, chain in all_chains:
+        for pth, tok, missing in chain:
+            if missing:
+                report["issues"].append(
+                    {"level": "error", "host": scope,
+                     "msg": f"@import 指向不存在的文件: {pth}"})
+            elif tok > 2000:
+                report["issues"].append(
+                    {"level": "warn", "host": scope,
+                     "msg": f"指令文件过重(~{tok} tokens): {pth}，考虑精简或拆分"})
+
     # bin 遮蔽
     for sh in bin_shadow_check():
         report["issues"].append(
@@ -290,6 +366,21 @@ def print_audit(report, as_md=False):
             line = f"  - {e['fm_name'] or e['link_name']}: ~{e['desc_tokens']} tokens"
             w(line)
 
+    instr = report.get("instructions", {"global": {}, "project": []})
+    home = str(HOME)
+    if instr["global"] or instr["project"]:
+        head = "指令文件(每次会话全文加载)"
+        w(("\n## " + head) if as_md else col("\n" + head, "cyan"))
+        for scope, chain in list(instr["global"].items()) + (
+                [("当前项目", instr["project"])] if instr["project"] else []):
+            total = sum(t for _, t, m in chain if not m)
+            w(f"  {scope}: ≈ {total} tokens")
+            for i, (pth, tok, missing) in enumerate(chain):
+                show = pth.replace(home, "~")
+                mark = "" if i == 0 else "└@ "
+                w(f"    - {mark}{show}" + (
+                    "  [缺失!]" if missing else f"  ~{tok}"))
+
     orphans = [n for n, s in report["sources"].items() if s.get("orphan")]
     if orphans:
         head = f"未被任何宿主使用的真源技能 ({len(orphans)})"
@@ -313,8 +404,14 @@ def print_audit(report, as_md=False):
     if not report["issues"]:
         w("  ✓ 没发现问题" if not as_md else "- ✅ 没发现问题")
 
-    total = sum(s["desc_tokens_est"] for s in report["stats"].values())
-    tail = f"\n合计 context 税(估算): ~{total} tokens/会话 · 数字为估算值,量级可信"
+    skill_total = sum(s["desc_tokens_est"] for s in report["stats"].values())
+    instr_total = sum(
+        t for chain in list(instr["global"].values()) + [instr["project"]]
+        for _, t, m in chain if not m)
+    total = skill_total + instr_total
+    tail = (f"\n合计 context 税(估算): ~{total} tokens/会话"
+            f"  = skill 描述 ~{skill_total} + 指令文件 ~{instr_total}"
+            f" · 数字为估算值,量级可信")
     w(tail if not as_md else tail + "\n\n---\n*Generated by skx · Skill X-ray*")
     print("\n".join(out))
 
